@@ -7,6 +7,9 @@ global.Log = function(data) {
 	if (logtoconsole) {
 		console.log(botName, ">>>", data);
 	}
+	if (logtodb) {
+		client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'log (logentry, logtime)' + 'VALUES (?, NOW())', [data]);
+	}
 };
 
 /* ============== */
@@ -17,6 +20,12 @@ global.OnReady = function(data) {
 	bot.roomRegister(botRoomId);
 	if (useDB) {
 		SetUpDatabase();
+	}
+	if (useTwitter) {
+		twitter.post('statuses/update', { status: msgTwitterReady }, function(err, reply) {
+		  Log(err);
+		  Log(reply);
+		});
 	}
 };
 
@@ -33,6 +42,10 @@ global.OnRoomChanged = function(data) {
 
 	activeDj = data.room.metadata.current_dj;
 	Log(activeDj);
+	
+	if (currentsong.artist == null && activeDj !== null){
+		PopulateSongData(data);
+	}
 
 	/* Check if the queue should be enabled. */
 	EnableQueue();
@@ -43,7 +56,7 @@ global.OnRoomChanged = function(data) {
 	if (useDB) {
 		for (var i in data.users) {
 			if (data.users[i].name !== null) {
-				client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'USER (userid, username, lastseen)' + 'VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE lastseen = NOW()', [data.users[i].userid, data.users[i].name]);
+				client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'user (userid, username, lastseen)' + 'VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE lastseen = NOW()', [data.users[i].userid, data.users[i].name]);
 			}
 		}
 	}
@@ -69,7 +82,7 @@ global.OnRegistered = function(data) {
 	}
 	if (useDB) {
 		if (data.user[0].name !== null) {
-			client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'USER (userid, username, lastseen)' + 'VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE lastseen = NOW()', [data.user[0].userid, data.user[0].name]);
+			client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'user (userid, username, lastseen)' + 'VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE lastseen = NOW()', [data.user[0].userid, data.user[0].name]);
 		}
 	}
 };
@@ -94,7 +107,11 @@ global.OnDeregistered = function(data) {
 			}
 		}
 	}
-
+	if (useDB) {
+		if (data.user[0].name !== null) {
+			client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'user (userid, username, lastseen)' + 'VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE lastseen = NOW()', [data.user[0].userid, data.user[0].name]);
+		}
+	}
 	/* Remove the user from the Queue if they were on it. */
 	RemoveFromQueue(data.user[0].userid);
 };
@@ -118,6 +135,9 @@ global.OnAddDJ = function(data) {
 	UpdateDjs();
 
 	CheckAutoDj();
+	
+	/* Check to see if they were in the last two to step down */
+	ReDJCheck(data);
 
 	/* Check if they are from the queue if there is one */
 	NewDjFromQueue(data);
@@ -139,6 +159,8 @@ global.OnRemDJ = function(data) {
 	UpdateDjs();
 
 	CheckAutoDj();
+	
+	DJwaitStart = new Date();
 
 	/* Notify the next DJ on the list */
 	NextDjOnQueue();
@@ -161,25 +183,28 @@ global.OnNewSong = function(data) {
 
 	activeDj = data.room.metadata.current_dj;
 	Log("New DJ: " + activeDj);
+	/* Update the play count if active */
+	if (djMaxPlays !== 0) {
+		allUsers[activeDj].Increment_SongCount();
+	}
 
 	if (IsBot(activeDj)) {
 		botIsPlayingSong = true;
 		Log("Bot DJing");
 	}
 
-	/* Update the play count if active */
+	/* Share the playcount */
 	if (djMaxPlays !== 0) {
-		allUsers[activeDj].Increment_SongCount();
 		SpeakPlayCount();
 	}
 
 	/* Check if queue status needs updating and update max plays */
 	EnableQueue();
 
-	/* If the bot is on the table, vote up the song */
+	/* If the bot is on the table, vote up the song 
 	if (botOnTable) {
 		AwesomeSong();
-	}
+	}*/
 };
 
 /* ============== */
@@ -190,7 +215,7 @@ global.OnEndSong = function(data) {
 
 	//Log song in DB
 	if (useDB) {
-		AddSongToDb();
+		AddPlayToDb();
 	}
 
 	if (IsBot(data.room.metadata.current_dj)) {
@@ -307,7 +332,7 @@ global.Command = function(source, data) {
 
 		Log("Command: " + command + " | Param: " + param);
 
-		if (command == "q+") {
+		if (command == "q+" || command == "addme") {
 			AddToQueue(data);
 		} else if (command == "q-") {
 			RemoveFromQueue(data.userid);
@@ -315,23 +340,39 @@ global.Command = function(source, data) {
 			QueueStatus();
 		} else if (command == "rules") {
 			text = msgRules.replace(/\{username\}/gi, requestedUserName);
-			TellUser(requestedUser, text);
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
 		} else if (command == "info") {
 			text = msgInfo.replace(/\{username\}/gi, requestedUserName);
-			TellUser(requestedUser, text);
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
 		} else if (command == "qrules") {
 			text = msgQueueRules.replace(/\{username\}/gi, requestedUserName);
-			TellUser(requestedUser, text);
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
 		} else if (command == "help") {
 			text = msgHelp.replace(/\{username\}/gi, requestedUserName);
-			TellUser(requestedUser, text);
+			Speak(text);
 			if (IsMod(requestedUser)) {
 				Pause(250);
 				text = msgModHelp.replace(/\{username\}/gi, requestedUserName);
 				TellUser(requestedUser, text);
 			}
 		} else if (command == "whois" || command == "about") {
-			Speak(msgAbout);
+			if (speak) {
+				Speak(msgAbout);
+			} else if (pm) {
+				TellUser(requestedUser, msgAbout);
+			}
 		} else if (command == "count") {
 			SpeakPlayCount();
 		} else if (command == "issue" || command == "bug" || command == "feature" || command == "idea") {
@@ -417,10 +458,74 @@ global.Command = function(source, data) {
 		}else if (command == "addsong") {
 			AddSong(requestedUser);
 		}
+		else if (command == "nowait") {
+			text = "You want me to suspend the wait requirement?";
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
+		}
+		else if (command == "mystats") {
+			text = "You want me to tell you about your stats?";
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
+		}
+		else if (command == "myplays") {
+			text = "You want me to tell you about your plays?";
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
+		}
+		else if (command == "topdjs") {
+			text = "You want me to tell you about the top djs?";
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
+		}
+		else if (command == "topsongs") {
+			text = "You want me to tell you about the top songs?";
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
+		}
+		else if (command == "topartists") {
+			text = "You want me to tell you about the top artists?";
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
+		}
+		else if (command == "taco") {
+			text = "Sweet!  I love tacos!";
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
+		}
+		else if (command == "slurm") {
+			text = "Whimmy Wham Wham Wozzle!";
+			if (speak) {
+				Speak(text);
+			} else if (pm) {
+				TellUser(requestedUser, text);
+			}
+		}
 
 		/* Catch all */
 		else {
-			Speak("Unknown Command");
+			Speak("I have no idea what you're talking about.  I'm going to go back to rocking, ok?");
 		}
 	}
 
@@ -575,7 +680,11 @@ global.QueueStatus = function() { /**/
 	for (var i = 0; i < djQueue.length; i++) {
 		djList += allUsers[djQueue[i]].name + ", ";
 	}
-	var text = msgQueueStatus.replace(/\{queuesize\}/gi, djQueue.length).replace(/\{queuedDjs\}/gi, djList);
+	if (queueActive && useQueue) {
+		var text = msgQueueStatus.replace(/\{queuesize\}/gi, djQueue.length).replace(/\{queuedDjs\}/gi, djList);
+	} else {
+		var text = msgNoQueue;
+	}
 	Speak(text);
 };
 
@@ -590,9 +699,9 @@ global.CheckIfDjShouldBeRemoved = function(userid) {
 				allUsers[djs[i]].afkCount++;
 				if (allUsers[djs[i]].afkCount >= afkPlayCount) {
 					allUsers[djs[i]].RemoveDJ();
-					TellUser(djs[i], msgAFKBoot);
+					Speak(msgAFKBoot.replace(/\{username\}/gi, allUsers[djs[i]].name));
 				} else if (allUsers[djs[i]].afkCount >= 1) {
-					TellUser(djs[i], msgAFKWarn);
+					Speak(msgAFKWarn.replace(/\{username\}/gi, allUsers[djs[i]].name));
 				}
 			} else {
 				allUsers[djs[i]].afkCount = 0;
@@ -600,9 +709,15 @@ global.CheckIfDjShouldBeRemoved = function(userid) {
 		}
 	}
 
-	if (allUsers[userid].songCount >= djMaxPlays && djMaxPlays !== 0 && !IsBot(userid)) {
+	//check against maxplays
+	if (djs.length > suspendBootthreshold && allUsers[userid].songCount >= djMaxPlays && djMaxPlays !== 0 && !IsBot(userid)) {
 		allUsers[userid].RemoveDJ();
 		Speak(msgLastSong.replace(/\{username\}/gi, allUsers[userid].name));
+		djWait[1] = djWait[0];
+		djWait[0] = userid;
+	}
+	if (djs.length <= suspendBootthreshold && allUsers[userid].songCount == djMaxPlays && !IsBot(userid)) {
+		Speak(msgSmallCrowd);
 	}
 	if (botStepDownAfterSong) {
 		allUsers[userid].RemoveDJ();
@@ -651,14 +766,14 @@ global.CheckAutoDj = function() {
 					return;
 				}
 
-				if (data.room.metadata.djcount <= (data.room.metadata.max_djs - 2)) {
+				if (data.room.metadata.djcount < botDJthreshold) {
 					if (!botOnTable) {
 						StepUp();
 						return;
 					}
 				}
 
-				if (data.room.metadata.djcount == data.room.metadata.max_djs) {
+				if (data.room.metadata.djcount > botDJthreshold) {
 					if (botOnTable && !botIsPlayingSong) {
 						StepDown();
 						return;
@@ -700,9 +815,11 @@ global.AddSong = function(userid) {
 			var songName = data.room.metadata.current_song.metadata.song;
 			bot.playlistAdd(newSong);
 			bot.vote('up');
+			Speak(msgAddSong);
 		});
 	} else {
 		Log("Not mod on add");
+		Speak(msgAddSongNotMod);
 	}
 };
 
@@ -796,44 +913,142 @@ global.PopulateSongData = function(data) {
 	currentsong.snags = 0;
 };
 
-global.AddSongToDb = function(data) {
-	client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'SONG SET artist = ?,song = ?, djid = ?, up = ?, down = ?,' + 'listeners = ?, started = NOW(), snags = ?, bonus = ?', [currentsong.artist, currentsong.song, currentsong.djid, currentsong.up, currentsong.down, currentsong.listeners, currentsong.snags, 0]);
+global.AddPlayToDb = function(data) {
+	var songArtist = currentsong.artist;
+	var songName = currentsong.song;
+	var songDJName = currentsong.djname;
+	var songDJID = currentsong.djid;
+	var songUp = currentsong.up;
+	var songDown = currentsong.down;
+	var songListeners = currentsong.listeners;
+	var songSnags = currentsong.snags;
+	client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'artist (artist,lastplayed)' + 'VALUES (?, NOW()) ON DUPLICATE KEY UPDATE lastplayed = NOW()', [songArtist]);
+	client.query('SELECT id FROM ' + dbName + '.' + dbTablePrefix + 'artist WHERE artist = ?', [songArtist],
+		function selectCb(error, results, fields) {
+		  if (error) {
+			  Log('GetData Error: ' + error.message);
+			  client.end();
+			  return;
+		  }
+	 
+		  if(results.length > 0)
+		  {
+			var firstResult = results[0];
+			artistid = firstResult['id'];
+			Log('Artist ID: ' + artistid);
+			client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'song (artist_id,song,up,down,listeners,snags,bonus)' + 'VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE up = up + ?, down = down + ?, listeners = listeners + ?, snags = snags + ?', [artistid, songName, songUp, songDown, songListeners, songSnags, 0, songUp, songDown, songListeners, songSnags]);
+			client.query('SELECT id FROM ' + dbName + '.' + dbTablePrefix + 'song WHERE artist_id = ? AND song = ?', [artistid, songName],
+				function selectCb(error, results, fields) {
+				  if (error) {
+					  Log('GetData Error: ' + error.message);
+					  client.end();
+					  return;
+				  }
+			 
+				  if(results.length > 0)
+				  {
+					var firstResult = results[0];
+					songid = firstResult['id'];
+					Log('Song ID: ' + songid);
+					client.query('INSERT INTO ' + dbName + '.' + dbTablePrefix + 'play (song_id,dj_id,up,down,listeners,started,snags)'+ 'VALUES (?, ?, ?, ?, ?, NOW(), ?)', [songid, songDJID, songUp, songDown, songListeners, songSnags]);
+				  }
+				}
+			);  
+		  }
+		}
+	);
+};
+
+global.ReDJCheck = function(data) {
+	var currentTime = new Date();
+	if ((currentTime.getTime() - DJwaitStart.getTime() > (reDJwaitTimeout * 1000)) & djWait[0] !== 1) {
+		Log("No More Wait");
+		for (var r = 0; r < reDJwait; r++) {
+			djWait[r] = 1;
+		}
+		Speak(msgReDJAllowed);
+	}
+
+	for (var r = 0; r < reDJwait; r++) {
+		if (data.user[0].userid == djWait[r]){
+			Log("Cannot DJ Again So Soon");
+			text = msgReDJTooSoon.replace(/\{username\}/gi, data.user[0].name);
+			Speak(text);
+			bot.remDj(data.user[0].userid);
+		}
+	}
 };
 
 global.SetUpDatabase = function() {
 	//Creates DB and tables if needed, connects to db
-	client.query('CREATE DATABASE ' + dbName, function(error) {
-		if (error && error.number != mysql.ERROR_DB_CREATE_EXISTS) {
-			throw (error);
+	client.query('CREATE DATABASE ' + dbName, 
+		function(error) {
+			if (error && error.number != mysql.ERROR_DB_CREATE_EXISTS) {
+				throw (error);
+			}
 		}
-	});
+	);
 	client.query('USE ' + dbName);
 
 	//song table
-	client.query('CREATE TABLE ' + dbTablePrefix + 'SONG(id INT(11) AUTO_INCREMENT PRIMARY KEY,' + ' artist VARCHAR(255),' + ' song VARCHAR(255),' + ' djid VARCHAR(255),' + ' up INT(3),' + ' down INT(3),' + ' listeners INT(3),' + ' started DATETIME,' + ' snags INT(3),' + ' bonus INT(3))',
-
-	function(error) {
-		//Handle an error if it's not a table already exists error
-		if (error && error.number != 1050) {
-			throw (error);
+	client.query('CREATE TABLE ' + dbTablePrefix + 'song(id INT(11) AUTO_INCREMENT,' + ' artist_id int(11),' + ' song VARCHAR(255),' + ' up INT(11),' + ' down INT(11),' + ' listeners INT(11),' + ' snags INT(11),' + ' bonus INT(11),' + 'PRIMARY KEY (artist_id, song),' + 'UNIQUE INDEX id (id))', 
+		function(error) {
+			//Handle an error if it's not a table already exists error
+			if (error && error.number != 1050) {
+				throw (error);
+			}
 		}
-	});
+	);
 
 	//chat table
-	client.query('CREATE TABLE ' + dbTablePrefix + 'CHAT(id INT(11) AUTO_INCREMENT PRIMARY KEY,' + ' userid VARCHAR(255),' + ' chat VARCHAR(255),' + ' time DATETIME)', function(error) {
-		//Handle an error if it's not a table already exists error
-		if (error && error.number != 1050) {
-			throw (error);
+	client.query('CREATE TABLE ' + dbTablePrefix + 'chat(id INT(11) AUTO_INCREMENT PRIMARY KEY,' + ' userid VARCHAR(255),' + ' chat VARCHAR(255),' + ' time DATETIME)', 
+		function(error) {
+			//Handle an error if it's not a table already exists error
+			if (error && error.number != 1050) {
+				throw (error);
+			}
 		}
-	});
+	);
 
 	//user table
-	client.query('CREATE TABLE ' + dbTablePrefix + 'USER(userid VARCHAR(255), ' + 'username VARCHAR(255), ' + 'lastseen DATETIME, ' + 'PRIMARY KEY (userid, username))', function(error) {
-		//Handle an error if it's not a table already exists error
-		if (error && error.number != 1050) {
-			throw (error);
+	client.query('CREATE TABLE ' + dbTablePrefix + 'user(userid VARCHAR(255), ' + 'username VARCHAR(255), ' + 'lastseen DATETIME, ' + 'PRIMARY KEY (userid, username))',
+		function(error) {
+			//Handle an error if it's not a table already exists error
+			if (error && error.number != 1050) {
+				throw (error);
+			}
 		}
-	});
+	);
+	
+	//play table
+	client.query('CREATE TABLE ' + dbTablePrefix + 'play(id INT(11) AUTO_INCREMENT PRIMARY KEY, ' + 'song_id INT(11), ' + 'dj_id VARCHAR(255), ' + 'up INT(11), '+ 'down INT(11), '+ 'listeners INT(11), ' + 'started DATETIME, '+ 'snags INT(11))',
+		function(error) {
+			//Handle an error if it's not a table already exists error
+			if (error && error.number != 1050) {
+				throw (error);
+			}
+		}
+	);
+	
+	//artist table
+	client.query('CREATE TABLE ' + dbTablePrefix + 'artist(id INT(11) AUTO_INCREMENT PRIMARY KEY, ' + 'artist VARCHAR(255), ' + 'lastplayed DATETIME)',
+		function(error) {
+			//Handle an error if it's not a table already exists error
+			if (error && error.number != 1050) {
+				throw (error);
+			}
+		}
+	);
+	
+	//log table
+	client.query('CREATE TABLE ' + dbTablePrefix + 'log(id INT(11) AUTO_INCREMENT PRIMARY KEY, ' + 'logentry VARCHAR(5000), ' + 'logtime DATETIME)',
+		function(error) {
+			//Handle an error if it's not a table already exists error
+			if (error && error.number != 1050) {
+				throw (error);
+			}
+		}
+	);
 };
 
 /* ============== */

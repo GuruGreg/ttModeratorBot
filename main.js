@@ -1,6 +1,4 @@
 /* Main logic */
-
-global.Functions = require("./functions.js");
 global.TTAPI = require("ttapi");
 global.client = null;
 
@@ -8,13 +6,33 @@ if (useDB) {
 	global.mysql = require("mysql");
 
 	try {
-		client = mysql.createClient({ user: dbLogin, password: dbPassword});
+		client = mysql.createClient({ user: dbLogin, password: dbPassword, host: dbHost});
 	} catch (e) {
 		useDB = false;
-		Log(e);
-		Log("DB Turned Off");
+		console.log(botName, ">>>", e);
+		console.log(botName, ">>>", "DB Turned Off");
 	}
 }
+
+if (useTwitter) {
+	global.twit = require("twit");
+	
+	try {
+		twitter = new twit({
+			consumer_key:         twitterConsumerKey,
+			consumer_secret:      twitterConsumerSecret,
+			access_token:         twitterAccessToken,
+			access_token_secret:  twitterAccessTokenSecret
+		});
+	} catch (e) {
+		useTwitter = false;
+		console.log(botName, ">>>", e);
+		console.log(botName, ">>>", "Twitter Turned Off");
+	}
+}
+	
+
+global.Functions = require("./functions.js");
 
 Log("Initializing");
 
@@ -28,6 +46,7 @@ global.djMaxPlays = maxPlays;
 // Fields for queue
 global.queueActive = false;
 global.djQueue = [ ];
+global.djWait = [ ];
 global.nextDj = null;
 global.nextDjTime = null;
 global.refreshIntervalId = null;
